@@ -12,7 +12,6 @@ import torch
 
 from unirl.algorithms.base import AlgorithmStepResult, StageAlgorithm
 from unirl.distributed.group.dispatch import Dispatch, distributed
-from unirl.distributed.group.remote import Remote
 from unirl.distributed.tensor.batch import _move_value
 from unirl.train.backend.fsdp import FSDPBackend
 from unirl.train.stack.anchor import prepare_segment_anchors, validate_anchor_contract
@@ -24,9 +23,9 @@ from unirl.train.stack.planner import (
     Plan,
     UpdatePlan,
     UpdatePlanner,
-    _positive_int,
     arranged_slice,
 )
+from unirl.train.stack.support import TrainStackSupport, validate_multi_update_support, validate_stack_config
 from unirl.types.sample import Part
 from unirl.utils.metrics import aggregate_numeric_metrics
 
@@ -48,14 +47,16 @@ class TrainStepResult:
     per_update: Tuple[Mapping[str, object], ...] = ()
 
 
-def _aggregate_update_results(results: List["TrainStepResult"]) -> "TrainStepResult":
+def aggregate_update_results(
+    results: List["TrainStepResult"], *, include_per_update: bool = False
+) -> "TrainStepResult":
     """Collapse one rollout's per-update results into a single summary."""
     if len(results) == 1:
         return results[0]
     n = len(results)
     micros: List[AlgorithmStepResult] = [m for r in results for m in r.micros]
     metrics = aggregate_numeric_metrics([dict(r.metrics) for r in results if r.metrics])
-    return TrainStepResult(
+    aggregated = TrainStepResult(
         loss=sum(r.loss for r in results) / n,
         grad_norm=sum(r.grad_norm for r in results) / n,
         lr=results[-1].lr,
@@ -64,6 +65,21 @@ def _aggregate_update_results(results: List["TrainStepResult"]) -> "TrainStepRes
         metrics=metrics,
         optimizer_updates=sum(r.optimizer_updates for r in results),
     )
+    if include_per_update:
+        aggregated = replace(
+            aggregated,
+            per_update=tuple(
+                {
+                    **r.metrics,
+                    "loss": r.loss,
+                    "grad_norm": r.grad_norm,
+                    "lr": r.lr,
+                    "optimizer_updates": r.optimizer_updates,
+                }
+                for r in results
+            ),
+        )
+    return aggregated
 
 
 def _align_track_to_model(part: Part, *, device: torch.device) -> None:
@@ -75,7 +91,7 @@ def _align_track_to_model(part: Part, *, device: torch.device) -> None:
         part.advantages = part.advantages.to(device=device)
 
 
-class TrainStack(Remote):
+class TrainStack(TrainStackSupport):
     """Single-stage stage-driven train stack — family-agnostic."""
 
     def __init__(
@@ -92,23 +108,17 @@ class TrainStack(Remote):
     ) -> None:
         super().__init__()
         cls = type(self).__name__
-        if int(micro_batch_size) < 1:
-            raise ValueError(f"{cls}.micro_batch_size must be >= 1; got {micro_batch_size}.")
-        if float(max_grad_norm) <= 0.0:
-            raise ValueError(f"{cls}.max_grad_norm must be > 0; got {max_grad_norm}.")
-        self.num_updates_per_batch = _positive_int(name=f"{cls}.num_updates_per_batch", value=num_updates_per_batch)
-        if self.num_updates_per_batch > 1 and not algorithm.supports_multi_update:
-            raise ValueError(
-                f"num_updates_per_batch={self.num_updates_per_batch} requires an algorithm whose "
-                f"old_logp anchor stays frozen across the N optimizer steps "
-                f"(FlowGRPO / FlowDPPO / GRPO / DRPO). "
-                f"{type(algorithm).__name__} sets supports_multi_update=False, so >1 optimizer "
-                f"step would train against a moving anchor. Set num_updates_per_batch=1."
-            )
+        micro_batch_size, max_grad_norm, self.num_updates_per_batch = validate_stack_config(
+            owner=cls,
+            micro_batch_size=micro_batch_size,
+            max_grad_norm=max_grad_norm,
+            num_updates_per_batch=num_updates_per_batch,
+        )
+        validate_multi_update_support(self.num_updates_per_batch, ((None, algorithm),))
         self.fsdp_backend = fsdp_backend
         self.algorithm = algorithm
-        self.micro_batch_size = int(micro_batch_size)
-        self.max_grad_norm = float(max_grad_norm)
+        self.micro_batch_size = micro_batch_size
+        self.max_grad_norm = max_grad_norm
         self.update_planner = UpdatePlanner(
             micro_planner if micro_planner is not None else CountPlanner(),
             shuffle_updates=shuffle_updates,
@@ -234,10 +244,6 @@ class TrainStack(Remote):
             optimizer_updates=1 if has_backward and math.isfinite(grad_norm) else 0,
         )
 
-    def on_rollout_end(self) -> None:
-        """Per-rollout-boundary hook — delegates to the FSDPBackend's EMA."""
-        self.fsdp_backend.on_rollout_end()
-
     def _all_reduce_sums(self, values: List[float]) -> List[float]:
         """SUM scalars over the backend's FSDP mesh (no-op single-rank)."""
         return self.fsdp_backend.all_reduce_loss_sums(values)
@@ -349,17 +355,7 @@ class TrainStack(Remote):
             prior_backward = prior_backward or result.has_backward
             results.append(result)
         # The window is one optimizer step: its grad_norm is the stepping call's.
-        return replace(_aggregate_update_results(results), grad_norm=results[-1].grad_norm)
-
-    def _train_step_profiler(self):
-        """Lazily build the per-worker train-step profiler (None unless UNIRL_PROFILE)."""
-        cached = getattr(self, "_profiler_cache", "unset")
-        if cached == "unset":
-            from unirl.utils.profiling import maybe_build_train_profiler
-
-            cached = maybe_build_train_profiler(int(getattr(self.fsdp_backend, "_rank", 0)))
-            self._profiler_cache = cached
-        return cached
+        return replace(aggregate_update_results(results), grad_norm=results[-1].grad_norm)
 
     def _run_updates(
         self,
@@ -382,34 +378,9 @@ class TrainStack(Remote):
             )
             with cm:
                 results.append(self._run_update(part, micros=micros, order=order, training_progress=training_progress))
-        if len(results) == 1:
-            return results[0]
-        aggregated = _aggregate_update_results(results)
-        per_update = tuple(
-            {
-                **r.metrics,
-                "loss": r.loss,
-                "grad_norm": r.grad_norm,
-                "lr": r.lr,
-                "optimizer_updates": r.optimizer_updates,
-            }
-            for r in results
-        )
-        return replace(aggregated, per_update=per_update)
+        return aggregate_update_results(results, include_per_update=True)
 
     def _align_track_inputs(self, part: Part) -> None:
         """Move the track onto the model's device; see :func:`_align_track_to_model`."""
         device = next(self.fsdp_backend.trainable_module().parameters()).device
         _align_track_to_model(part, device=device)
-
-    def _current_lr(self) -> float:
-        optimizer = self.fsdp_backend.optimizer
-        param_groups = getattr(optimizer, "param_groups", None)
-        if isinstance(param_groups, list) and param_groups:
-            return float(param_groups[0]["lr"])
-        scheduler = self.fsdp_backend.scheduler
-        if scheduler is not None and hasattr(scheduler, "get_last_lr"):
-            last = scheduler.get_last_lr()
-            if isinstance(last, list) and last:
-                return float(last[0])
-        return 0.0

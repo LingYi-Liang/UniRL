@@ -5,23 +5,26 @@ from __future__ import annotations
 import logging
 import math
 from contextlib import nullcontext
-from dataclasses import replace
 from typing import Dict, List, Mapping, Optional, Tuple
 
 import torch
 
 from unirl.algorithms.base import AlgorithmStepResult, StageAlgorithm
 from unirl.distributed.group.dispatch import Dispatch, distributed
-from unirl.distributed.group.remote import Remote
 from unirl.train.backend.fsdp import FSDPBackend
-from unirl.train.stack import TrainStepResult, prepare_segment_anchors, resolve_loss_scales, validate_anchor_contract
-from unirl.train.stack.base import _aggregate_update_results
+from unirl.train.stack import (
+    TrainStepResult,
+    aggregate_update_results,
+    prepare_segment_anchors,
+    resolve_loss_scales,
+    validate_anchor_contract,
+)
 from unirl.train.stack.planner import (
     CountPlanner,
     UpdatePlanner,
-    _positive_int,
     arranged_slice,
 )
+from unirl.train.stack.support import TrainStackSupport, validate_multi_update_support, validate_stack_config
 from unirl.types.sample import Part, Sample
 from unirl.types.sampling import ARSamplingParams, DiffusionSamplingParams
 from unirl.utils.metrics import aggregate_numeric_metrics
@@ -29,7 +32,7 @@ from unirl.utils.metrics import aggregate_numeric_metrics
 logger = logging.getLogger(__name__)
 
 
-class UnifiedModelTrainStack(Remote):
+class UnifiedModelTrainStack(TrainStackSupport):
     """Single-backbone, multi-algorithm train stack."""
 
     def __init__(
@@ -45,29 +48,22 @@ class UnifiedModelTrainStack(Remote):
         shuffle_seed: int = 0,
     ) -> None:
         super().__init__()
-        if int(micro_batch_size) < 1:
-            raise ValueError(f"UnifiedModelTrainStack.micro_batch_size must be >= 1; got {micro_batch_size}.")
-        if float(max_grad_norm) <= 0.0:
-            raise ValueError(f"UnifiedModelTrainStack.max_grad_norm must be > 0; got {max_grad_norm}.")
+        micro_batch_size, max_grad_norm, self.num_updates_per_batch = validate_stack_config(
+            owner="UnifiedModelTrainStack",
+            micro_batch_size=micro_batch_size,
+            max_grad_norm=max_grad_norm,
+            num_updates_per_batch=num_updates_per_batch,
+        )
         self.fsdp_backend = fsdp_backend
         self.ar_algorithm = ar_algorithm
         self.image_algorithm = image_algorithm
-        self.micro_batch_size = int(micro_batch_size)
-        self.max_grad_norm = float(max_grad_norm)
-        self.num_updates_per_batch = _positive_int(
-            name="UnifiedModelTrainStack.num_updates_per_batch", value=num_updates_per_batch
-        )
+        self.micro_batch_size = micro_batch_size
+        self.max_grad_norm = max_grad_norm
         validate_anchor_contract(self.ar_algorithm)
         validate_anchor_contract(self.image_algorithm)
-        if self.num_updates_per_batch > 1:
-            for name, algo in (("ar", self.ar_algorithm), ("image", self.image_algorithm)):
-                if not algo.supports_multi_update:
-                    raise ValueError(
-                        f"num_updates_per_batch={self.num_updates_per_batch} requires every algorithm's "
-                        f"π_old anchor to stay frozen across the N optimizer steps, but the {name!r} "
-                        f"algorithm ({type(algo).__name__}) sets supports_multi_update=False. Set "
-                        f"num_updates_per_batch=1."
-                    )
+        validate_multi_update_support(
+            self.num_updates_per_batch, (("ar", self.ar_algorithm), ("image", self.image_algorithm))
+        )
         self.update_planner = UpdatePlanner(
             CountPlanner(),
             shuffle_updates=shuffle_updates,
@@ -193,20 +189,6 @@ class UnifiedModelTrainStack(Remote):
             )
         return results
 
-    def on_rollout_end(self) -> None:
-        """Per-rollout-boundary hook — delegates to the FSDPBackend's EMA."""
-        self.fsdp_backend.on_rollout_end()
-
-    def _train_step_profiler(self):
-        """Lazily build the per-worker train-step profiler (None unless UNIRL_PROFILE)."""
-        cached = getattr(self, "_profiler_cache", "unset")
-        if cached == "unset":
-            from unirl.utils.profiling import maybe_build_train_profiler
-
-            cached = maybe_build_train_profiler(int(getattr(self.fsdp_backend, "_rank", 0)))
-            self._profiler_cache = cached
-        return cached
-
     @distributed(dispatch_mode=Dispatch.DP_SCATTER)
     def train_track(
         self,
@@ -263,29 +245,8 @@ class UnifiedModelTrainStack(Remote):
         results: Dict[str, TrainStepResult] = {}
         for name in ("ar", "image"):
             updates = [upd[name] for upd in per_update]
-            aggregated = _aggregate_update_results(updates)
-            if len(updates) > 1:
-                aggregated = replace(
-                    aggregated,
-                    per_update=tuple(
-                        {**dict(r.metrics), "loss": float(r.loss), "grad_norm": float(r.grad_norm), "lr": float(r.lr)}
-                        for r in updates
-                    ),
-                )
-            results[name] = aggregated
+            results[name] = aggregate_update_results(updates, include_per_update=True)
         return results
-
-    def _current_lr(self) -> float:
-        optimizer = self.fsdp_backend.optimizer
-        param_groups = getattr(optimizer, "param_groups", None)
-        if isinstance(param_groups, list) and param_groups:
-            return float(param_groups[0]["lr"])
-        scheduler = self.fsdp_backend.scheduler
-        if scheduler is not None and hasattr(scheduler, "get_last_lr"):
-            last = scheduler.get_last_lr()
-            if isinstance(last, list) and last:
-                return float(last[0])
-        return 0.0
 
 
 __all__ = ["UnifiedModelTrainStack"]

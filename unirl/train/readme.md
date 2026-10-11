@@ -50,6 +50,9 @@ knows nothing about DTensor sharding or wrap topology.
 - **`UnifiedModelTrainStack`** (`unified_model_stack.py`) drives two algorithms
   (`ar` + `image`) backward-accumulating into one shared optimizer step on one
   shared backbone (HunyuanImage3).
+- **`TrainStackSupport`** (`stack/support.py`) owns the shared backend lifecycle,
+  lazy profiler cache, and LR lookup. Both stacks use the same scalar and
+  multi-update validators while retaining their anchor-validation order.
 
 **Extending it:** a new structural injection mode is an `inject_<mode>` alongside
 `inject_lora` (`lora.py`) and `inject_nft` / `inject_mirror` (`ema.py`), called
@@ -119,6 +122,12 @@ use LoRA adapter mode. Formats and export live in
 
 ## Gotchas
 
+- **Both stacks report the same per-update result keys.** For multiple updates,
+  `aggregate_update_results(..., include_per_update=True)` adds `loss`,
+  `grad_norm`, `lr`, and authoritative `optimizer_updates` over algorithm metrics.
+  A skipped update contributes zero; unified tracks report the same shared
+  optimizer step, not independent steps. Accumulation-window summaries retain
+  their separate reporting behavior.
 - **`num_updates_per_batch > 1` needs `supports_multi_update` *and* must evenly
   divide the per-worker batch** — otherwise the ctor or `_build_mini_batch_slices`
   raises (a ragged mini-batch would silently drop samples and desync grad-accum
