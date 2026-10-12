@@ -55,7 +55,7 @@ def aggregate_update_results(
         return results[0]
     n = len(results)
     micros: List[AlgorithmStepResult] = [m for r in results for m in r.micros]
-    metrics = aggregate_numeric_metrics([dict(r.metrics) for r in results if r.metrics])
+    metrics = aggregate_numeric_metrics([r.metrics for r in results if r.metrics])
     aggregated = TrainStepResult(
         loss=sum(r.loss for r in results) / n,
         grad_norm=sum(r.grad_norm for r in results) / n,
@@ -209,7 +209,7 @@ class TrainStack(BaseTrainStack):
             # Accumulation-only part: the window's final part steps.
             grad_norm = 0.0
         elif window_backward:
-            grad_norm = float(self.fsdp_backend.optimizer_step(max_grad_norm=self.max_grad_norm))
+            grad_norm = self.fsdp_backend.optimizer_step(max_grad_norm=self.max_grad_norm)
         else:
             grad_norm = 0.0
             logger.warning(
@@ -366,11 +366,7 @@ class TrainStack(BaseTrainStack):
         scope_update = profile_mode() == "one-update"
         results = []
         for micros in plans:
-            cm = (
-                maybe_profile_update(self, int(getattr(self.fsdp_backend, "_rank", 0)))
-                if scope_update
-                else nullcontext()
-            )
+            cm = maybe_profile_update(self, self.fsdp_backend._rank) if scope_update else nullcontext()
             with cm:
                 results.append(self._run_update(part, micros=micros, order=order, training_progress=training_progress))
         return aggregate_update_results(results, include_per_update=True)

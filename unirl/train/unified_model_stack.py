@@ -161,7 +161,7 @@ class UnifiedModelTrainStack(BaseTrainStack):
             # Defragment between multi-updates before NCCL gradient clipping.
             if self.num_updates_per_batch > 1 and torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            grad_norm = float(self.fsdp_backend.optimizer_step(max_grad_norm=self.max_grad_norm))
+            grad_norm = self.fsdp_backend.optimizer_step(max_grad_norm=self.max_grad_norm)
         else:
             grad_norm = 0.0
             logger.warning("UnifiedModelTrainStack._train_one_step: no algorithm reported backward; skipping step.")

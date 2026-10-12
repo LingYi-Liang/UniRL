@@ -59,13 +59,5 @@ class BaseTrainStack(Remote):
         return maybe_build_train_profiler(self.fsdp_backend._rank)
 
     def _current_lr(self) -> float:
-        optimizer = self.fsdp_backend.optimizer
-        param_groups = getattr(optimizer, "param_groups", None)
-        if isinstance(param_groups, list) and param_groups:
-            return float(param_groups[0]["lr"])
-        scheduler = self.fsdp_backend.scheduler
-        if scheduler is not None and hasattr(scheduler, "get_last_lr"):
-            last = scheduler.get_last_lr()
-            if isinstance(last, list) and last:
-                return float(last[0])
-        return 0.0
+        """Learning rate of the optimizer's first param group."""
+        return self.fsdp_backend.optimizer.param_groups[0]["lr"]
