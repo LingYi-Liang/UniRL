@@ -15,6 +15,7 @@ from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.tensor.batch import _move_value
 from unirl.train.backend.fsdp import FSDPBackend
 from unirl.train.stack.anchor import prepare_segment_anchors, validate_anchor_contract
+from unirl.train.stack.common import TrainStackBase
 from unirl.train.stack.loss_scale import resolve_loss_scales
 from unirl.train.stack.planner import (
     Arrangement,
@@ -25,7 +26,6 @@ from unirl.train.stack.planner import (
     UpdatePlanner,
     arranged_slice,
 )
-from unirl.train.stack.support import TrainStackSupport, validate_multi_update_support, validate_stack_config
 from unirl.types.sample import Part
 from unirl.utils.metrics import aggregate_numeric_metrics
 
@@ -91,7 +91,7 @@ def _align_track_to_model(part: Part, *, device: torch.device) -> None:
         part.advantages = part.advantages.to(device=device)
 
 
-class TrainStack(TrainStackSupport):
+class TrainStack(TrainStackBase):
     """Single-stage stage-driven train stack — family-agnostic."""
 
     def __init__(
@@ -106,19 +106,14 @@ class TrainStack(TrainStackSupport):
         shuffle_updates: bool = False,
         shuffle_seed: int = 0,
     ) -> None:
-        super().__init__()
-        cls = type(self).__name__
-        micro_batch_size, max_grad_norm, self.num_updates_per_batch = validate_stack_config(
-            owner=cls,
+        super().__init__(
+            fsdp_backend=fsdp_backend,
+            algorithms=(algorithm,),
             micro_batch_size=micro_batch_size,
             max_grad_norm=max_grad_norm,
             num_updates_per_batch=num_updates_per_batch,
         )
-        validate_multi_update_support(self.num_updates_per_batch, ((None, algorithm),))
-        self.fsdp_backend = fsdp_backend
         self.algorithm = algorithm
-        self.micro_batch_size = micro_batch_size
-        self.max_grad_norm = max_grad_norm
         self.update_planner = UpdatePlanner(
             micro_planner if micro_planner is not None else CountPlanner(),
             shuffle_updates=shuffle_updates,
@@ -214,7 +209,7 @@ class TrainStack(TrainStackSupport):
             # Accumulation-only part: the window's final part steps.
             grad_norm = 0.0
         elif window_backward:
-            grad_norm = float(self.fsdp_backend.optimizer_step(max_grad_norm=float(self.max_grad_norm)))
+            grad_norm = float(self.fsdp_backend.optimizer_step(max_grad_norm=self.max_grad_norm))
         else:
             grad_norm = 0.0
             logger.warning(
@@ -312,7 +307,7 @@ class TrainStack(TrainStackSupport):
         )
         from unirl.utils.profiling import profile_mode
 
-        profiler = self._train_step_profiler() if profile_mode() == "train" else None
+        profiler = self._train_step_profiler if profile_mode() == "train" else None
         with profiler.record("train_track") if profiler is not None else nullcontext():
             if len(arranged) == 1:
                 part, plans, order = arranged[0]

@@ -19,12 +19,12 @@ from unirl.train.stack import (
     resolve_loss_scales,
     validate_anchor_contract,
 )
+from unirl.train.stack.common import TrainStackBase
 from unirl.train.stack.planner import (
     CountPlanner,
     UpdatePlanner,
     arranged_slice,
 )
-from unirl.train.stack.support import TrainStackSupport, validate_multi_update_support, validate_stack_config
 from unirl.types.sample import Part, Sample
 from unirl.types.sampling import ARSamplingParams, DiffusionSamplingParams
 from unirl.utils.metrics import aggregate_numeric_metrics
@@ -32,7 +32,7 @@ from unirl.utils.metrics import aggregate_numeric_metrics
 logger = logging.getLogger(__name__)
 
 
-class UnifiedModelTrainStack(TrainStackSupport):
+class UnifiedModelTrainStack(TrainStackBase):
     """Single-backbone, multi-algorithm train stack."""
 
     def __init__(
@@ -47,23 +47,17 @@ class UnifiedModelTrainStack(TrainStackSupport):
         shuffle_updates: bool = False,
         shuffle_seed: int = 0,
     ) -> None:
-        super().__init__()
-        micro_batch_size, max_grad_norm, self.num_updates_per_batch = validate_stack_config(
-            owner="UnifiedModelTrainStack",
+        super().__init__(
+            fsdp_backend=fsdp_backend,
+            algorithms=(ar_algorithm, image_algorithm),
             micro_batch_size=micro_batch_size,
             max_grad_norm=max_grad_norm,
             num_updates_per_batch=num_updates_per_batch,
         )
-        self.fsdp_backend = fsdp_backend
         self.ar_algorithm = ar_algorithm
         self.image_algorithm = image_algorithm
-        self.micro_batch_size = micro_batch_size
-        self.max_grad_norm = max_grad_norm
         validate_anchor_contract(self.ar_algorithm)
         validate_anchor_contract(self.image_algorithm)
-        validate_multi_update_support(
-            self.num_updates_per_batch, (("ar", self.ar_algorithm), ("image", self.image_algorithm))
-        )
         self.update_planner = UpdatePlanner(
             CountPlanner(),
             shuffle_updates=shuffle_updates,
@@ -167,7 +161,7 @@ class UnifiedModelTrainStack(TrainStackSupport):
             # Defragment between multi-updates before NCCL gradient clipping.
             if self.num_updates_per_batch > 1 and torch.cuda.is_available():
                 torch.cuda.empty_cache()
-            grad_norm = float(self.fsdp_backend.optimizer_step(max_grad_norm=float(self.max_grad_norm)))
+            grad_norm = float(self.fsdp_backend.optimizer_step(max_grad_norm=self.max_grad_norm))
         else:
             grad_norm = 0.0
             logger.warning("UnifiedModelTrainStack._train_one_step: no algorithm reported backward; skipping step.")
@@ -219,7 +213,7 @@ class UnifiedModelTrainStack(TrainStackSupport):
                 "UNIRL_PROFILE=one-update is not supported on the unified-model stack "
                 "(no _run_updates loop); use UNIRL_PROFILE=train. No trace produced."
             )
-        profiler = self._train_step_profiler() if scope == "train" else None
+        profiler = self._train_step_profiler if scope == "train" else None
         with profiler.record("train_track") if profiler is not None else nullcontext():
             prepare_segment_anchors(self.ar_algorithm, ar_part, ar_steps, order=ar_order)
             prepare_segment_anchors(self.image_algorithm, image_part, image_steps, order=image_order)
