@@ -19,7 +19,7 @@ from unirl.train.stack import (
     resolve_loss_scales,
     validate_anchor_contract,
 )
-from unirl.train.stack.common import TrainStackBase
+from unirl.train.stack.common import BaseTrainStack
 from unirl.train.stack.planner import (
     CountPlanner,
     UpdatePlanner,
@@ -32,7 +32,7 @@ from unirl.utils.metrics import aggregate_numeric_metrics
 logger = logging.getLogger(__name__)
 
 
-class UnifiedModelTrainStack(TrainStackBase):
+class UnifiedModelTrainStack(BaseTrainStack):
     """Single-backbone, multi-algorithm train stack."""
 
     def __init__(

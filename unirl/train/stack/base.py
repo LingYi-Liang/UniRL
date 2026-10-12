@@ -15,7 +15,7 @@ from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.tensor.batch import _move_value
 from unirl.train.backend.fsdp import FSDPBackend
 from unirl.train.stack.anchor import prepare_segment_anchors, validate_anchor_contract
-from unirl.train.stack.common import TrainStackBase
+from unirl.train.stack.common import BaseTrainStack
 from unirl.train.stack.loss_scale import resolve_loss_scales
 from unirl.train.stack.planner import (
     Arrangement,
@@ -91,7 +91,7 @@ def _align_track_to_model(part: Part, *, device: torch.device) -> None:
         part.advantages = part.advantages.to(device=device)
 
 
-class TrainStack(TrainStackBase):
+class TrainStack(BaseTrainStack):
     """Single-stage stage-driven train stack — family-agnostic."""
 
     def __init__(

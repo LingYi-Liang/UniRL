@@ -13,7 +13,7 @@ if TYPE_CHECKING:
     from unirl.train.backend.fsdp import FSDPBackend
 
 
-class TrainStackBase(Remote):
+class BaseTrainStack(Remote):
     """Constructor validation and backend lifecycle shared by stacks with independent training loops."""
 
     def __init__(
