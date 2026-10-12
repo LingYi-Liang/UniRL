@@ -82,7 +82,7 @@ class UnifiedModelTrainStack(BaseTrainStack):
         if not micro_slices:
             raise ValueError(f"UnifiedModelTrainStack.train: empty micro_slices for {type(algorithm).__name__} Part.")
 
-        bs = int(part.batch_size)
+        bs = part.batch_size
         loss_scales, global_weight = resolve_loss_scales(
             algorithm,
             part,
@@ -171,7 +171,7 @@ class UnifiedModelTrainStack(BaseTrainStack):
         # Each track's local sum(loss * loss_scale) averages to its DP-global loss over the gradient world.
         loss_sums = self.fsdp_backend.all_reduce_loss_sums([r.loss for r in results.values()])
         dp_world = self.fsdp_backend.gradient_average_world_size()
-        for (name, r), loss_sum in zip(list(results.items()), loss_sums):
+        for (name, r), loss_sum in zip(results.items(), loss_sums):
             results[name] = TrainStepResult(
                 loss=loss_sum / dp_world,
                 grad_norm=grad_norm,
@@ -228,7 +228,7 @@ class UnifiedModelTrainStack(BaseTrainStack):
                         image_slices=image_steps[u],
                         ar_order=ar_order,
                         image_order=image_order,
-                        training_progress=float(training_progress),
+                        training_progress=training_progress,
                     )
                 )
         if profiler is not None:

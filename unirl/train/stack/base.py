@@ -134,7 +134,7 @@ class TrainStack(BaseTrainStack):
         prior_backward: bool = False,
     ) -> TrainStepResult:
         """Run the micro ranges of a single update; step unless mid-window."""
-        if part.advantages is None and getattr(self.algorithm, "requires_advantages", True):
+        if part.advantages is None and self.algorithm.requires_advantages:
             raise ValueError(
                 f"{type(self).__name__}._run_update: part.advantages is None; "
                 "upstream advantage pipeline must populate it before training. "
@@ -143,7 +143,7 @@ class TrainStack(BaseTrainStack):
         if not micros:
             raise ValueError(f"{type(self).__name__}._run_update: empty micros.")
 
-        bs = int(part.batch_size)
+        bs = part.batch_size
         if zero_grad:
             self.fsdp_backend.zero_grad()
 
@@ -219,7 +219,7 @@ class TrainStack(BaseTrainStack):
         if torch.cuda.is_available():
             # CUDA memory footprint per optimizer step (leak diagnosis: tp2 path showed progressive OOM).
             aggregated_metrics = {
-                **dict(aggregated_metrics),
+                **aggregated_metrics,
                 "cuda_alloc_gb": torch.cuda.memory_allocated() / 2**30,
                 "cuda_reserved_gb": torch.cuda.memory_reserved() / 2**30,
             }
@@ -227,7 +227,7 @@ class TrainStack(BaseTrainStack):
         (global_loss_sum,) = self._all_reduce_sums([total_loss])
         total_loss = global_loss_sum / self.fsdp_backend.gradient_average_world_size()
         if global_weight is not None:
-            aggregated_metrics = {**dict(aggregated_metrics), "global_loss_weight": global_weight}
+            aggregated_metrics = {**aggregated_metrics, "global_loss_weight": global_weight}
 
         return TrainStepResult(
             loss=total_loss,
@@ -268,10 +268,10 @@ class TrainStack(BaseTrainStack):
                     s, w = eval_fn(
                         conditions=micro.conditions,
                         segment=micro.segment,
-                        sample_ids=list(micro.sample_ids) if micro.sample_ids else None,
+                        sample_ids=micro.sample_ids or None,
                     )
-                    loss_sum += float(s)
-                    weight_sum += float(w)
+                    loss_sum += s
+                    weight_sum += w
         finally:
             model.train(was_training)
         global_loss, global_weight = self._all_reduce_sums([loss_sum, weight_sum])
@@ -312,9 +312,9 @@ class TrainStack(BaseTrainStack):
             if len(arranged) == 1:
                 part, plans, order = arranged[0]
                 part = self._prepare_for_training(part, plans=plans, order=order)
-                result = self._run_updates(part, plans=plans, order=order, training_progress=float(training_progress))
+                result = self._run_updates(part, plans=plans, order=order, training_progress=training_progress)
             else:
-                result = self._run_window(arranged, training_progress=float(training_progress))
+                result = self._run_window(arranged, training_progress=training_progress)
         if profiler is not None:
             profiler.step()
         self.on_rollout_end()
