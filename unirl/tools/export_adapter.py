@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Union
 import torch
 from safetensors.torch import save_file
 
-from unirl.tools._checkpoint import load_training_checkpoint
+from unirl.tools._checkpoint import checkpoint_bias_keys, load_training_checkpoint
 
 _HELP = """Export a UniRL LoRA checkpoint to a PEFT adapter folder.
 
@@ -35,6 +35,7 @@ def export_adapter_state_dict(
     *,
     adapter: str = "default",
     peft_prefix: str = PEFT_PREFIX,
+    bias_keys: Optional[Iterable[str]] = None,
 ) -> Dict[str, torch.Tensor]:
     """Convert UniRL PEFT-injected LoRA keys to PEFT adapter-file keys."""
     pairs: Dict[str, Dict[str, torch.Tensor]] = {}
@@ -56,6 +57,11 @@ def export_adapter_state_dict(
     for stem, pair in pairs.items():
         out[f"{stem}.lora_A.weight"] = pair["lora_A"].detach().cpu()
         out[f"{stem}.lora_B.weight"] = pair["lora_B"].detach().cpu()
+    for key in bias_keys or ():
+        if key not in state_dict:
+            raise SystemExit(f"checkpoint is missing trained bias tensor {key!r}")
+        output_key = key if not peft_prefix or key.startswith(peft_prefix) else f"{peft_prefix}{key}"
+        out[output_key] = state_dict[key].detach().cpu()
     return out
 
 
@@ -223,6 +229,7 @@ def main() -> None:
         state_dict,
         adapter=args.adapter,
         peft_prefix=str(args.peft_prefix or ""),
+        bias_keys=checkpoint_bias_keys(checkpoint, adapter=args.adapter, bias=bias),
     )
 
     os.makedirs(args.output, exist_ok=True)

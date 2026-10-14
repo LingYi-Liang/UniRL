@@ -374,7 +374,7 @@ class FrozenAdapters:
         return cls(shas)
 
     def is_trainable_lora_key(self, key: str) -> bool:
-        """True for ``lora_A`` / ``lora_B`` keys of a non-frozen adapter — what adapter checkpoints hold."""
+        """True for ``lora_A`` / ``lora_B`` keys of a non-frozen adapter."""
         return ("lora_A" in key or "lora_B" in key) and _adapter_of_lora_key(key) not in self.shas
 
     def check_resume(self, lora_config: Optional[Dict[str, object]]) -> None:

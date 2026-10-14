@@ -6,7 +6,7 @@ import logging
 import math
 import os
 from concurrent.futures import Future
-from typing import TYPE_CHECKING, Dict, List, Literal, Optional
+from typing import TYPE_CHECKING, Callable, Dict, List, Literal, Optional
 
 import torch
 import torch.distributed as dist
@@ -249,6 +249,14 @@ class BaseFSDP2Backend(Remote):
             if active_lora is not None
             else None
         )
+        if active_lora is not None and active_lora.bias != "none":
+            names = {name for name, _ in model.named_parameters(remove_duplicate=False)}
+            if active_lora.bias == "all":
+                bias_keys = {name for name in names if "bias" in name and ".lora_" not in name}
+            else:
+                stems = {name.split(".lora_")[0] for name in names if self._frozen_adapters.is_trainable_lora_key(name)}
+                bias_keys = {f"{stem}.base_layer.bias" for stem in stems} & names
+            self._lora_meta["bias_keys"] = sorted(bias_keys)
         self._rollout_adapter_name = str(ema_lora_cfg.shadow_adapter) if ema_lora_cfg is not None else "default"
         # Deferred gradient sync is supported only under ZeRO-2.
         self._defer_grad_sync = bool(fsdp_cfg.defer_grad_sync) and not bool(fsdp_cfg.reshard_after_forward)
@@ -398,7 +406,8 @@ class BaseFSDP2Backend(Remote):
         self._reject_meta(operation="save", checkpoint_format="dcp", mode=mode)
         model_sd = drop_meta_entries(sharded_model_state_dict(self.model))
         if mode == "adapter":
-            model_sd = {k: v for k, v in model_sd.items() if self._frozen_adapters.is_trainable_lora_key(k)}
+            keep = self._adapter_checkpoint_filter()
+            model_sd = {k: v for k, v in model_sd.items() if keep(k)}
         sharded_state: Dict[str, object] = {
             "model": model_sd,
             "optim": sharded_optimizer_state_dict(self.model, self.optimizer),
@@ -486,7 +495,14 @@ class BaseFSDP2Backend(Remote):
         self._frozen_adapters.check_resume(checkpoint.get("lora_config"))
         policy_state = checkpoint["policy_state_dict"]
         if mode == "adapter":
-            policy_state = {k: v for k, v in policy_state.items() if self._frozen_adapters.is_trainable_lora_key(k)}
+            missing_bias = set((self._lora_meta or {}).get("bias_keys", ())) - policy_state.keys()
+            if missing_bias:
+                raise RuntimeError(
+                    f"adapter checkpoint is missing trained bias tensors: {sorted(missing_bias)[:8]}; "
+                    "resume from a full checkpoint or one saved with bias tensors"
+                )
+            keep = self._adapter_checkpoint_filter()
+            policy_state = {k: v for k, v in policy_state.items() if keep(k)}
         self._load_model_state(policy_state, strict=strict)
         self._load_optimizer_state(checkpoint["optimizer_state_dict"])
         if self.scheduler is not None and "scheduler_state_dict" in checkpoint:
@@ -516,7 +532,8 @@ class BaseFSDP2Backend(Remote):
         self._frozen_adapters.check_resume(meta.get("lora_config"))
         model_sd = drop_meta_entries(sharded_model_state_dict(self.model))
         if mode == "adapter":
-            model_sd = {k: v for k, v in model_sd.items() if self._frozen_adapters.is_trainable_lora_key(k)}
+            keep = self._adapter_checkpoint_filter()
+            model_sd = {k: v for k, v in model_sd.items() if keep(k)}
         sharded_state: Dict[str, object] = {
             "model": model_sd,
             "optim": sharded_optimizer_state_dict(self.model, self.optimizer),
@@ -541,8 +558,9 @@ class BaseFSDP2Backend(Remote):
         """Single materialization guard for every checkpoint save/load path."""
         named = list(self.model.named_parameters())
         if mode == "adapter":
-            meta = [n for n, p in named if p.is_meta and ("lora_A" in n or "lora_B" in n)]
-            why = "adapter checkpointing requires materialized LoRA params"
+            bias_keys = set((self._lora_meta or {}).get("bias_keys", ()))
+            meta = [n for n, p in named if p.is_meta and ("lora_A" in n or "lora_B" in n or n in bias_keys)]
+            why = "adapter checkpointing requires materialized LoRA params and trained biases"
         elif checkpoint_format == "dcp":
             meta = [n for n, p in named if p.is_meta and p.requires_grad]
             why = "trainable params on meta would be silently dropped from the DCP checkpoint (materialize missed them)"
@@ -669,8 +687,13 @@ class BaseFSDP2Backend(Remote):
     def _gather_model_state(self, mode: str) -> StateDict:
         """Rank-0 model state for the single-file checkpoint."""
         if mode == "adapter":
-            return gather_lora_state_dict(self.model, keep=self._frozen_adapters.is_trainable_lora_key)
+            return gather_lora_state_dict(self.model, keep=self._adapter_checkpoint_filter())
         return gather_state_dict(self.model)
+
+    def _adapter_checkpoint_filter(self) -> Callable[[str], bool]:
+        """Non-frozen LoRA parameters and the biases selected by the recorded training config."""
+        bias_keys = set((self._lora_meta or {}).get("bias_keys", ()))
+        return lambda key: self._frozen_adapters.is_trainable_lora_key(key) or key in bias_keys
 
     def _load_model_state(self, model_state: StateDict, *, strict: bool) -> None:
         """Restore model state from a single-file checkpoint."""
