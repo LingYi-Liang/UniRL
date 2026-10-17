@@ -205,17 +205,9 @@ def main() -> None:
                 if target not in base_state:
                     raise SystemExit(f"adapter target {target!r} does not match the base model")
                 state_dict[f"{stem}.base_layer.weight"] = base_state[target]
-    if save_mode == "adapter" or (
-        save_mode is None
-        and any(".lora_A." in k for k in state_dict)
-        and not any(k.endswith(".base_layer.weight") for k in state_dict)
-    ):
-        merged = fold_adapter_into_base(
-            model.state_dict(), state_dict, adapter=args.adapter, alpha=alpha, bias_keys=bias_keys
-        )
-    elif any(".base_layer." in k for k in state_dict):
+    if save_mode != "adapter" and any(k.endswith(".base_layer.weight") for k in state_dict):
         merged = merge_lora_state_dict(state_dict, adapter=args.adapter, alpha=alpha)
-    elif any(".lora_A." in k for k in state_dict):
+    elif save_mode == "adapter" or any(".lora_A." in k for k in state_dict):
         merged = fold_adapter_into_base(
             model.state_dict(), state_dict, adapter=args.adapter, alpha=alpha, bias_keys=bias_keys
         )

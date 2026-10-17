@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import logging
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import Callable, Iterator, List, Optional, Tuple
 
@@ -20,6 +20,7 @@ from unirl.train.lora import (
     _activate,
     _reset_adapter,
     _set_adapter_requires_grad,
+    is_base_bias_key,
     normalize_module_selection,
     normalize_optional_module_selection,
 )
@@ -126,11 +127,18 @@ def inject_nft(
         task_type=str(task_type),
     )
     inject_adapter_in_model(peft_cfg, model, adapter_name=default)
-    inject_adapter_in_model(peft_cfg, model, adapter_name=shadow)
+    if bias == "all":
+        for name, param in model.named_parameters():
+            if ".lora_" not in name:
+                param.requires_grad = is_base_bias_key(name)
+    prior_grad = [(p, p.requires_grad) for p in model.parameters()]
+    inject_adapter_in_model(replace(peft_cfg, bias="none"), model, adapter_name=shadow)
 
     if hasattr(model, "_hf_peft_config_loaded"):
         model._hf_peft_config_loaded = True
     _activate_keep_grad(model, default, trainable=default, frozen=shadow)
+    for param, requires_grad in prior_grad:
+        param.requires_grad = requires_grad
 
     if _current_rank() == 0:
         n_trainable = sum(1 for p in model.parameters() if p.requires_grad)

@@ -194,7 +194,8 @@ def main() -> None:
         exclude_modules = _optional_modules(recorded.get("exclude_modules"))
 
     dropout = args.lora_dropout if args.lora_dropout is not None else recorded.get("dropout", 0.0)
-    bias = args.bias if args.bias is not None else recorded.get("bias", "none")
+    default_bias = "none" if args.adapter in (recorded.get("frozen_adapters") or {}) else recorded.get("bias", "none")
+    bias = args.bias if args.bias is not None else default_bias
     task_type = args.task_type if args.task_type is not None else recorded.get("task_type", "FEATURE_EXTRACTION")
 
     adapter_state = export_adapter_state_dict(

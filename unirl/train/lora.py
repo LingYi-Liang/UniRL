@@ -77,6 +77,12 @@ def resolve_target_modules_pattern(
     return pattern, pattern
 
 
+def is_base_bias_key(key: str) -> bool:
+    """True for a non-LoRA, non-shadow parameter whose leaf name contains ``bias``."""
+    leaf = key.rpartition(".")[2]
+    return "bias" in leaf and not leaf.startswith("shadow_") and ".lora_" not in key
+
+
 def inject_lora(
     model: nn.Module,
     *,
@@ -108,6 +114,10 @@ def inject_lora(
         task_type=str(task_type),
     )
     inject_adapter_in_model(peft_cfg, model, adapter_name=adapter_name)
+    if bias == "all":
+        for name, param in model.named_parameters():
+            if ".lora_" not in name:
+                param.requires_grad = is_base_bias_key(name)
 
     if _current_rank() == 0:
         n_trainable = sum(1 for p in model.parameters() if p.requires_grad)
@@ -242,6 +252,7 @@ def _inject_frozen_adapter(
     # The checkpoint overwrites the weights after materialization; skip peft's init (MiCA / orthogonal run an SVD
     # of the base weight, which breaks on meta-init bases). The remaining delta inits share the plain LoRA forward.
     peft_cfg.init_lora_weights = True
+    prior_grad = [(p, p.requires_grad) for p in model.parameters()]
     inject_adapter_in_model(peft_cfg, model, adapter_name=name)
 
     covered = [m for m in model.modules() if isinstance(m, LoraLayer) and name in m.lora_A]
@@ -255,7 +266,8 @@ def _inject_frozen_adapter(
     _set_adapter_requires_grad(model, name, False)
     # peft's inject path flips other adapters' requires_grad; restore the resting state.
     _activate(model, "default")
-    _set_adapter_requires_grad(model, "default", True)
+    for param, requires_grad in prior_grad:
+        param.requires_grad = requires_grad
     # Mirror inject_nft: keep diffusers' PeftAdapterMixin bookkeeping consistent.
     if hasattr(model, "_hf_peft_config_loaded"):
         model._hf_peft_config_loaded = True
@@ -425,6 +437,7 @@ __all__ = [
     "adapter_names",
     "adapters_disabled",
     "inject_lora",
+    "is_base_bias_key",
     "normalize_module_selection",
     "normalize_optional_module_selection",
     "resolve_target_modules_pattern",

@@ -14,6 +14,7 @@ from torch import nn
 
 from unirl.distributed.group.dispatch import Dispatch, distributed
 from unirl.distributed.group.remote import Remote
+from unirl.models.types.post_materialize import canonical_param_name
 from unirl.train.backend.base import ExpertWeightExportTransform, LrSchedulerConfig, OptimizerConfig
 from unirl.train.backend.sharded_state import (
     StateDict,
@@ -28,7 +29,7 @@ from unirl.train.backend.sharded_state import (
 )
 from unirl.train.configs import EmaFullConfig, EmaLoraConfig, FSDPConfig, LoraConfig
 from unirl.train.ema import EMA, Shadow, inject_mirror, inject_nft, make_decay_fn
-from unirl.train.lora import FrozenAdapters, inject_lora, resolve_target_modules_pattern
+from unirl.train.lora import FrozenAdapters, inject_lora, is_base_bias_key, resolve_target_modules_pattern
 from unirl.train.optim import build_lr_scheduler, build_optimizer
 from unirl.utils.distributed_utils import find_dtensor_mesh, init_gloo_group
 
@@ -193,9 +194,9 @@ class BaseFSDP2Backend(Remote):
             else None
         )
         if active_lora is not None and active_lora.bias != "none":
-            names = {name for name, _ in model.named_parameters(remove_duplicate=False)}
+            names = {canonical_param_name(name) for name, _ in model.named_parameters(remove_duplicate=False)}
             if active_lora.bias == "all":
-                bias_keys = {name for name in names if "bias" in name and ".lora_" not in name}
+                bias_keys = {name for name in names if is_base_bias_key(name)}
             else:
                 stems = {name.split(".lora_")[0] for name in names if self._frozen_adapters.is_trainable_lora_key(name)}
                 bias_keys = {f"{stem}.base_layer.bias" for stem in stems} & names
@@ -461,6 +462,15 @@ class BaseFSDP2Backend(Remote):
             sharded_options = StateDictOptions(full_state_dict=False)
             model_sd = drop_meta_entries(dict(get_model_state_dict(self.model, options=sharded_options)))
             if mode == "adapter":
+                bias_keys = set((self.lora_meta or {}).get("bias_keys", ()))
+                if bias_keys:
+                    dcp_meta = dcp.FileSystemReader(path).read_metadata().state_dict_metadata
+                    missing_bias = {k for k in bias_keys if f"model.{k}" not in dcp_meta}
+                    if missing_bias:
+                        raise RuntimeError(
+                            f"adapter checkpoint is missing trained bias tensors: {sorted(missing_bias)[:8]}; "
+                            "resume from a full checkpoint or one saved with bias tensors"
+                        )
                 keep = self._adapter_checkpoint_filter()
                 model_sd = {k: v for k, v in model_sd.items() if keep(k)}
             with fresh_adamw_state(self.optimizer):
@@ -530,7 +540,11 @@ class BaseFSDP2Backend(Remote):
         named = list(self.model.named_parameters())
         if mode == "adapter":
             bias_keys = set((self.lora_meta or {}).get("bias_keys", ()))
-            meta = [n for n, p in named if p.is_meta and ("lora_A" in n or "lora_B" in n or n in bias_keys)]
+            meta = [
+                n
+                for n, p in named
+                if p.is_meta and ("lora_A" in n or "lora_B" in n or canonical_param_name(n) in bias_keys)
+            ]
             why = "adapter checkpointing requires materialized LoRA params and trained biases"
         elif checkpoint_format == "dcp":
             meta = [n for n, p in named if p.is_meta and p.requires_grad]
