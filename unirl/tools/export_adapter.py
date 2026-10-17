@@ -10,7 +10,7 @@ from typing import Dict, List, Optional, Union
 import torch
 from safetensors.torch import save_file
 
-from unirl.tools._checkpoint import checkpoint_bias_keys, load_training_checkpoint
+from unirl.tools._checkpoint import load_training_checkpoint
 
 _HELP = """Export a UniRL LoRA checkpoint to a PEFT adapter folder.
 
@@ -35,7 +35,6 @@ def export_adapter_state_dict(
     *,
     adapter: str = "default",
     peft_prefix: str = PEFT_PREFIX,
-    bias_keys: Optional[Iterable[str]] = None,
 ) -> Dict[str, torch.Tensor]:
     """Convert UniRL PEFT-injected LoRA keys to PEFT adapter-file keys."""
     pairs: Dict[str, Dict[str, torch.Tensor]] = {}
@@ -57,11 +56,6 @@ def export_adapter_state_dict(
     for stem, pair in pairs.items():
         out[f"{stem}.lora_A.weight"] = pair["lora_A"].detach().cpu()
         out[f"{stem}.lora_B.weight"] = pair["lora_B"].detach().cpu()
-    for key in bias_keys or ():
-        if key not in state_dict:
-            raise SystemExit(f"checkpoint is missing trained bias tensor {key!r}")
-        output_key = key if not peft_prefix or key.startswith(peft_prefix) else f"{peft_prefix}{key}"
-        out[output_key] = state_dict[key].detach().cpu()
     return out
 
 
@@ -194,15 +188,18 @@ def main() -> None:
         exclude_modules = _optional_modules(recorded.get("exclude_modules"))
 
     dropout = args.lora_dropout if args.lora_dropout is not None else recorded.get("dropout", 0.0)
-    default_bias = "none" if args.adapter in (recorded.get("frozen_adapters") or {}) else recorded.get("bias", "none")
-    bias = args.bias if args.bias is not None else default_bias
+    bias = args.bias if args.bias is not None else recorded.get("bias", "none")
+    if bias != "none":
+        raise SystemExit(
+            f"export_adapter: bias must be 'none', got {bias!r}; "
+            "UniRL LoRA checkpoints only export lora_A/lora_B adapter weights."
+        )
     task_type = args.task_type if args.task_type is not None else recorded.get("task_type", "FEATURE_EXTRACTION")
 
     adapter_state = export_adapter_state_dict(
         state_dict,
         adapter=args.adapter,
         peft_prefix=args.peft_prefix,
-        bias_keys=checkpoint_bias_keys(checkpoint, adapter=args.adapter, bias=bias),
     )
 
     os.makedirs(args.output, exist_ok=True)

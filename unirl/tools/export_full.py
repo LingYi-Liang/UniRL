@@ -3,12 +3,11 @@
 from __future__ import annotations
 
 import argparse
-from collections.abc import Iterable
 from typing import Dict, Optional
 
 import torch
 
-from unirl.tools._checkpoint import checkpoint_bias_keys, load_training_checkpoint
+from unirl.tools._checkpoint import load_training_checkpoint
 
 _HELP = """Export a UniRL training checkpoint to a Hugging Face ``save_pretrained`` folder.
 
@@ -105,22 +104,11 @@ def fold_adapter_into_base(
     *,
     adapter: str = "default",
     alpha: Optional[float] = None,
-    bias_keys: Optional[Iterable[str]] = None,
 ) -> Dict[str, torch.Tensor]:
     """``save_mode=adapter`` checkpoint + base-model state dict → merged HF dict."""
     alpha = _require_alpha(alpha)
     marker = f".lora_A.{adapter}.weight"
     out = dict(base_state_dict)
-    for key in bias_keys or ():
-        target = key.replace(".base_layer.", ".")
-        if key not in adapter_state_dict or target not in out:
-            raise SystemExit(f"trained bias parameter {key!r} does not match the base model (missing {target!r})")
-        value = adapter_state_dict[key]
-        if value.shape != out[target].shape:
-            raise SystemExit(
-                f"trained bias {key!r} shape {tuple(value.shape)} != base shape {tuple(out[target].shape)}"
-            )
-        out[target] = value
     folded = 0
     for key, lora_a in adapter_state_dict.items():
         if not key.endswith(marker):
@@ -173,7 +161,6 @@ def main() -> None:
     lora_config = checkpoint.get("lora_config")
     recorded = {} if lora_config is None else lora_config
     alpha = args.lora_alpha if args.lora_alpha is not None else recorded.get("alpha")
-    bias_keys = checkpoint_bias_keys(checkpoint, adapter=args.adapter)
     print(f"loaded {args.checkpoint}: {len(state_dict)} tensors, step={checkpoint.get('step')}, lora_alpha={alpha}")
 
     dtype = DTYPES[args.dtype]
@@ -189,28 +176,10 @@ def main() -> None:
 
         model = AutoModelForCausalLM.from_pretrained(args.base, **from_pretrained_kwargs)
 
-    save_mode = checkpoint.get("save_mode")
-    if checkpoint.get("_checkpoint_format") == "dcp" and save_mode == "full":
-        base_state = model.state_dict()
-        marker = f".lora_A.{args.adapter}.weight"
-        missing_base = [
-            key[: -len(marker)]
-            for key in state_dict
-            if key.endswith(marker) and key[: -len(marker)] + ".base_layer.weight" not in state_dict
-        ]
-        if missing_base:
-            state_dict = dict(state_dict)
-            for stem in missing_base:
-                target = f"{stem}.weight"
-                if target not in base_state:
-                    raise SystemExit(f"adapter target {target!r} does not match the base model")
-                state_dict[f"{stem}.base_layer.weight"] = base_state[target]
-    if save_mode != "adapter" and any(k.endswith(".base_layer.weight") for k in state_dict):
+    if any(".base_layer." in k for k in state_dict):
         merged = merge_lora_state_dict(state_dict, adapter=args.adapter, alpha=alpha)
-    elif save_mode == "adapter" or any(".lora_A." in k for k in state_dict):
-        merged = fold_adapter_into_base(
-            model.state_dict(), state_dict, adapter=args.adapter, alpha=alpha, bias_keys=bias_keys
-        )
+    elif any(".lora_A." in k for k in state_dict):
+        merged = fold_adapter_into_base(model.state_dict(), state_dict, adapter=args.adapter, alpha=alpha)
     else:
         merged = dict(state_dict)
 

@@ -251,20 +251,12 @@ budget semantics are the generic ones in [Checkpointing](#checkpointing).
 
 Available for the single-backend trainers (including diffusion, AR, SFT, unified-model,
 ReFL, async, and agentic training) and for every trained side of `PETrainer`. A
-single-backend checkpoint bundles model state (`save_mode=auto`: adapter state when
+single-backend checkpoint bundles model state (`save_mode=auto`: LoRA-only when
 LoRA is active, otherwise full; `save_mode=full`: the whole model state;
-`save_mode=adapter`: LoRA keys and configured biases), optimizer and scheduler state, the step
+`save_mode=adapter`: LoRA keys only), optimizer and scheduler state, the step
 counters (`step`, `optimizer_step_count`), and the LoRA config (rank / alpha /
 target_modules / exclude_modules — export tooling reads its scaling and module
 selection from it).
-
-Adapter checkpoints include the base-layer biases trained by `bias=lora_only`,
-or PEFT's `bias=all` selection (parameter names containing `bias`, such as
-`in_proj_bias`). Their names are recorded as
-`lora_config.bias_keys` for offline export, including an empty list for models
-without biases. Frozen teacher adapters remain excluded. Resume rejects an old
-adapter checkpoint missing biases required by the current model; recover from a
-full checkpoint or an adapter checkpoint that includes them.
 
 The default backend `checkpoint_format=torch` gathers full state to distributed
 rank 0 and writes `<save_dir>/checkpoint-<step>/checkpoint.pt`. Setting the
@@ -310,7 +302,7 @@ Driven by top-level config keys, read by the entrypoints and forwarded to
 | --- | --- | --- |
 | `save_interval` | `0` | Save every N rollouts (and on the last); `0` disables saving. |
 | `save_dir` | `./checkpoints` | Output folder for `checkpoint-<step>/`, resolved on the driver (with Hydra's legacy chdir the default lands in the run output dir). |
-| `save_mode` | `auto` (`adapter` for ReFL; `full` for Async AR) | `auto` = adapter state when LoRA is active, otherwise full; `full` = whole model state; `adapter` = LoRA keys and configured biases (the frozen base reloads from the pretrained snapshot on resume). |
+| `save_mode` | `auto` (`adapter` for ReFL; `full` for Async AR) | `auto` = LoRA-only when LoRA is active, otherwise full; `full` = whole model state; `adapter` = LoRA keys only (the frozen base reloads from the pretrained snapshot on resume). |
 | `load_dir` | unset | A checkpoint dir to restore and resume from; unset trains fresh. |
 
 Recipes may expose these keys already. When a recipe does not, append them with
@@ -319,7 +311,7 @@ The whole lifecycle — train with saves, resume, fold the LoRA into the base an
 export to Hugging Face, share:
 
 ```bash
-# 1. Train, saving adapter checkpoints every 200 rollouts
+# 1. Train, saving LoRA-only checkpoints every 200 rollouts
 bash examples/run_experiment_single_node.sh diffusion/sd3/sd3_trainside \
     num_rollouts=500 \
     +save_interval=200 +save_dir=/ckpts/sd3_run +save_mode=adapter
@@ -378,11 +370,7 @@ weights and writes a standard `save_pretrained` folder; `export_adapter`
 extracts a single adapter into a PEFT adapter folder.
 
 Works with both checkpoint flavors: `save_mode=full` merges self-contained;
-`save_mode=adapter` folds the LoRA keys onto the freshly loaded base weights and
-replaces the configured biases with their trained values. PEFT adapter export
-also preserves these biases. Offline export rejects bias-enabled adapter
-checkpoints without a `bias_keys` record, since it cannot verify their
-completeness without the original model; older full checkpoints remain usable.
+`save_mode=adapter` folds the LoRA keys onto the freshly loaded base weights.
 The LoRA scaling comes from the `lora_config` recorded in the checkpoint;
 `--lora-alpha` overrides it (needed only for checkpoints predating the record).
 AR models: `--library transformers`, no `--subfolder`. For adapter artifacts,

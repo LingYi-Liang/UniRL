@@ -3,56 +3,9 @@
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional
+from typing import Dict
 
 import torch
-
-from unirl.train.lora import is_base_bias_key
-
-
-def checkpoint_bias_keys(
-    checkpoint: Dict[str, object],
-    *,
-    adapter: str = "default",
-    bias: Optional[str] = None,
-) -> List[str]:
-    """Select complete trained base biases for offline export; see trainer/README.md."""
-    recorded = checkpoint.get("lora_config") or {}
-    is_frozen = adapter in (recorded.get("frozen_adapters") or {})
-    recorded_bias = "none" if is_frozen else recorded.get("bias", "none")
-    selected_bias = recorded_bias if bias is None else bias
-    if selected_bias not in ("none", "all", "lora_only"):
-        raise SystemExit(f"unsupported LoRA bias setting {selected_bias!r}")
-    if recorded_bias != "none" and selected_bias != recorded_bias:
-        raise SystemExit(f"--bias={selected_bias!r} conflicts with recorded trained bias={recorded_bias!r}")
-    if selected_bias == "none":
-        return []
-
-    state_dict = checkpoint["policy_state_dict"]
-    keys = None if is_frozen else recorded.get("bias_keys")
-    if keys is None:
-        mode = checkpoint.get("save_mode")
-        if mode == "adapter" or (
-            mode is None
-            and any(".lora_A." in key for key in state_dict)
-            and not any(key.endswith(".base_layer.weight") for key in state_dict)
-        ):
-            raise SystemExit("adapter checkpoint records no bias_keys inventory; trained biases may be missing")
-        if selected_bias == "all":
-            keys = [key for key in state_dict if is_base_bias_key(key)]
-        else:
-            marker = f".lora_A.{adapter}.weight"
-            keys = [
-                key[: -len(marker)] + ".base_layer.bias"
-                for key in state_dict
-                if key.endswith(marker) and key[: -len(marker)] + ".base_layer.bias" in state_dict
-            ]
-    if not isinstance(keys, list) or any(not isinstance(key, str) or not is_base_bias_key(key) for key in keys):
-        raise SystemExit("checkpoint lora_config.bias_keys must list base parameters whose names contain 'bias'")
-    missing = sorted(set(keys) - set(state_dict))
-    if missing:
-        raise SystemExit(f"checkpoint is missing trained bias tensors: {missing[:8]}")
-    return keys
 
 
 def load_training_checkpoint(path: str) -> Dict[str, object]:
